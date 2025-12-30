@@ -35,6 +35,8 @@ struct MovementConfig {
     /*
      Position to go to
 
+     This (each component of the vector) is in meters.
+
      Leaving as `std::nullopt` will make the robot not move across the field,
      only turning in place (if `angle` is not `std::nullopt`)
 
@@ -45,6 +47,8 @@ struct MovementConfig {
     /*
      Desired angle of the robot
 
+     This is in degrees.
+
      Leaving as `std::nullopt` will make the robot not turn when moving,
      only moving across the field (if `pos` is not `std::nullopt`)
     */
@@ -54,37 +58,14 @@ struct MovementConfig {
      Maximum time to allocate to the movement before giving up and exiting
      as a `ResultCode::TIMEOUT`.
 
+     This field is in seconds.
+
      Leaving this as `std::nullopt` will make the movement never exit until
      the robot satisfies all four thresholds for exit (angle, angular velocity,
      distance, speed). As such, it is recommended to leave at least a high value
      for the timeout.
      */
     std::optional<double> timeout = std::nullopt;
-
-    /* 
-     Acceptable angle error (difference between target and robot angle) 
-     tolerance for determining wether to exit as a successful movement
-
-     Leaving this as `std::nullopt` will make the movement never exit,
-     which is not recommended - The robot will keep on trying to reach the
-     desired angle until timeout.
-     */
-    std::optional<float> angle_threshold = std::nullopt;
-
-    /*
-     Acceptable angular velocity tolerance for determining wether to exit
-     as a successful movement
-
-     This is used as an ensurance to the angle error, making sure that
-     if the movement exits as a success, in the immediate time after the
-     movement the angle would not change relatively much. This can be used to
-     ensure precise movements, though it requires more time for the movement
-     to settle down.
-
-     Leaving this as `std::nullopt` turns off this option, allowing
-     exit at any angular velocity.
-     */
-    std::optional<float> angular_speed_threshold = std::nullopt;
 
     /*
      Acceptable distance error (distance between robot pos and target pos) 
@@ -100,6 +81,8 @@ struct MovementConfig {
      Acceptable speed tolerance for determining wether to exit as a successful
      movement.
 
+     This field is in meters per second.
+
      This is used as an ensurance to the distance error, making sure that
      if the movement exits as a success, in the immediate time after the
      movement the robot would not move very much around the target. This can 
@@ -110,6 +93,53 @@ struct MovementConfig {
      exit at any speed.
      */
     std::optional<float> speed_threshold = std::nullopt;
+
+    /* 
+     Acceptable angle error (difference between target and robot angle) 
+     tolerance for determining wether to exit as a successful movement
+
+     This field is in degrees.
+
+     Leaving this as `std::nullopt` will make the movement never exit,
+     which is not recommended - The robot will keep on trying to reach the
+     desired angle until timeout.
+     */
+    std::optional<float> angle_threshold = std::nullopt;
+
+    /*
+     Acceptable angular velocity tolerance for determining wether to exit
+     as a successful movement
+
+     This field is in degrees per second.
+
+     This is used as an ensurance to the angle error, making sure that
+     if the movement exits as a success, in the immediate time after the
+     movement the angle would not change relatively much. This can be used to
+     ensure precise movements, though it requires more time for the movement
+     to settle down.
+
+     Leaving this as `std::nullopt` turns off this option, allowing
+     exit at any angular velocity.
+     */
+    std::optional<float> angular_speed_threshold = std::nullopt;
+
+    /*
+     Self explanatory: maximum velocity of the chassis during the movement.
+
+     This field is in RPM.
+    */
+    float max_velocity = 600.0f;
+
+    /*
+     Otherwise known as maximum acceleration.
+
+     This field is in RPM per second.
+
+     This controls how much the velocity can change over time, limiting
+     sudden changes in speed that can throw off odometry or cause wheel slip,
+     or in severe cases cause the robot to tilt over.
+    */
+    float slew_rate = 150.0f;
 };
 
 class HolonomicChassis {
@@ -124,10 +154,32 @@ public:
     int8_t vertical_tracker_port;
     float horizontal_tracker_offset;
     float vertical_tracker_offset;
+    float tracker_wheel_radius;
 
     // PID controllers used to hold/drive position and heading goals.
     PID position_pid;
     PID angular_pid;
+
+    HolonomicChassis(
+        std::vector<Motor> const& motors,
+        uint8_t inertial_port,
+        int8_t horizontal_tracker_port,
+        int8_t vertical_tracker_port,
+        float horizontal_tracker_offset,
+        float vertical_tracker_offset,
+        float tracker_wheel_radius,
+        PID const& position_pid,
+        PID const& angular_pid
+    ) : motors(motors),
+        inertial_port(inertial_port),
+        horizontal_tracker_port(horizontal_tracker_port),
+        vertical_tracker_port(vertical_tracker_port),
+        horizontal_tracker_offset(horizontal_tracker_offset),
+        vertical_tracker_offset(vertical_tracker_offset),
+        tracker_wheel_radius(tracker_wheel_radius),
+        position_pid(position_pid),
+        angular_pid(angular_pid)
+    {}
 
     // Get the position of the robot
     Eigen::Vector2f pos() { return position.lock()->pos; }
@@ -233,10 +285,10 @@ private:
         }
     };
 
-    pros::MutexVar<Position> position;
-    pros::MutexVar<Angle> theta;
     pros::task_t odom_task = nullptr;
+    pros::MutexVar<Position> position {};
+    pros::MutexVar<Angle> theta {};
 
-    static void odom_task_func(void* p);
+    static void odometry_task_func(void* p);
 };
 }

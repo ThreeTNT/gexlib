@@ -32,7 +32,7 @@ LIBNAME:=gexlib
 VERSION:=0.1.0
 # EXCLUDE_SRC_FROM_LIB= $(SRCDIR)/unpublishedfile.c
 # this line excludes opcontrol.c and similar files
-EXCLUDE_SRC_FROM_LIB+=src/main.cpp
+EXCLUDE_SRC_FROM_LIB=src/main.cpp
 
 MAKEFLAGS+=-j
 

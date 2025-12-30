@@ -27,6 +27,9 @@ public:
      */
     bool integral_reset = true;
 
+    PID(float kp = 0.0f, float ki = 0.0f, float kd = 0.0f, bool integral_reset = true)
+        : kp(kp), ki(ki), kd(kd), integral_reset(integral_reset), integral(0.0f) {}
+
     /**
      * Clears stored error/integral/timing data so the next update() call starts
      * fresh.

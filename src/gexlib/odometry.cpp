@@ -6,19 +6,9 @@
 
 using namespace gexlib;
 
-constexpr float EPSILON32 = 1e-4;
+constexpr float EPSILON32 = 1e-3;
 
-void HolonomicChassis::start_odometry() {
-    pros::c::imu_reset_blocking(inertial_port);
-
-    odom_task = pros::c::task_create(odom_task_func, 
-        this, 
-        TASK_PRIORITY_DEFAULT,
-        TASK_STACK_DEPTH_DEFAULT,
-        "Odometry task");
-}
-
-void HolonomicChassis::odom_task_func(void* p) {
+void HolonomicChassis::odometry_task_func(void* p) {
     HolonomicChassis* obj = static_cast<HolonomicChassis*>(p);
 
     float last_ht_pos = 0;
@@ -35,27 +25,28 @@ void HolonomicChassis::odom_task_func(void* p) {
         ctime = pros::micros();
 
         float cur_ht_pos = pros::c::rotation_get_position(obj->horizontal_tracker_port) \
-            * CENTIGREE_TO_RAD;
+            * CENTIGREE_TO_RAD * obj->tracker_wheel_radius;
         float cur_vt_pos = pros::c::rotation_get_position(obj->vertical_tracker_port) \
-            * CENTIGREE_TO_RAD;
+            * CENTIGREE_TO_RAD * obj->tracker_wheel_radius;
         float cur_theta = pros::c::imu_get_rotation(obj->inertial_port) 
-            * DEGREE_TO_RAD;
+            * DEGREE_TO_RAD 
+            * -1; // we multiply by -1 because clockwise is positive in VEX but negative in canonical trigonometry
 
         float dtheta = cur_theta - last_theta;
 
         Eigen::Vector2f deltapos;
         if (std::abs(dtheta) < EPSILON32) {
             Eigen::Vector2f deltas = {
-                (cur_ht_pos - last_ht_pos) - (dtheta * obj->horizontal_tracker_offset),
-                (cur_vt_pos - last_vt_pos) - (dtheta * obj->vertical_tracker_offset)
+                cur_ht_pos - last_ht_pos,
+                cur_vt_pos - last_vt_pos
             };
-            deltapos = rotation(cur_theta) * deltas;
+            deltapos = rotation(last_theta) * deltas;
         } else {
             auto rh = (cur_ht_pos - last_ht_pos) / dtheta - obj->horizontal_tracker_offset;
             auto rv = (cur_vt_pos - last_vt_pos) / dtheta - obj->vertical_tracker_offset;
 
             Eigen::Vector2f unit_diff = 
-                unit_vector(last_theta) - unit_vector(cur_theta);
+                unit_vector(cur_theta) - unit_vector(last_theta);
 
             deltapos = {
                 rh * unit_diff.y() + rv * unit_diff.x(),
@@ -80,4 +71,26 @@ void HolonomicChassis::odom_task_func(void* p) {
 
         pros::delay(10);
     }
+}
+
+void HolonomicChassis::start_odometry(void) {
+    if (odom_task != nullptr) {
+        return;
+    }
+
+    pros::c::imu_reset(inertial_port);
+    pros::delay(1000);
+    while (pros::c::imu_get_status(inertial_port) == pros::E_IMU_STATUS_CALIBRATING) {
+        pros::delay(100);
+    }
+    pros::c::rotation_reset_position(horizontal_tracker_port);
+    pros::c::rotation_reset_position(vertical_tracker_port);
+
+    odom_task = pros::c::task_create(
+        HolonomicChassis::odometry_task_func, 
+        this, 
+        TASK_PRIORITY_DEFAULT,
+        TASK_STACK_DEPTH_DEFAULT,
+        "odom_task"
+    );
 }

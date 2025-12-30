@@ -82,7 +82,8 @@
       }
     },
     "upload_options": {
-      "description": "Gexing it"
+      "description": "Gexing it",
+      "after": "screen"
     },
     "use_early_access": false
   }

@@ -2,10 +2,15 @@
 #include "gexlib/chassis.hpp"
 #include "gexlib/future.hpp"
 #include "pros/motors.h"
-#include "pros/rtos.h"
 #include <limits>
 
 using namespace gexlib;
+
+static inline void zero_velocity(HolonomicChassis* chassis) {
+    for (auto& motor : chassis->motors) {
+        pros::c::motor_move_velocity(motor.port, 0);
+    }
+}
 
 static MovementResult execute_movement_internal(
     HolonomicChassis* chassis,
@@ -13,6 +18,7 @@ static MovementResult execute_movement_internal(
     std::function<bool (void)> cancelled)
 {
     long long start_time = pros::micros();
+    long long last_time = start_time;
     double timeout = config.timeout.value_or(std::numeric_limits<double>::infinity());
 
     chassis->position_pid.reset();
@@ -20,6 +26,11 @@ static MovementResult execute_movement_internal(
 
     Eigen::Vector2f pos_error {0, 0};
     float theta_error = 0;
+
+    float controls[21] = {0};
+    for (auto& motor : chassis->motors) {
+        controls[motor.port] = pros::c::motor_get_actual_velocity(motor.port);
+    }
 
     long long ctime = pros::micros();
     while ((ctime - start_time) / 1e6 <= timeout) {
@@ -33,9 +44,8 @@ static MovementResult execute_movement_internal(
         pos_error = {0, 0};
         float pos_control = 0;
         if (config.pos.has_value()) {
-            pos_error = config.pos.value() - robot_pos;
-            pos_error /= std::max(1e-5f, pos_error.norm());
-            pos_control = chassis->position_pid.update<long long>(pos_error.norm(), 0, ctime);
+            pos_error = chassis->to_local_frame(config.pos.value());
+            pos_control = chassis->position_pid.update<long long>(0, pos_error.norm(), ctime);
         }
 
         // Compute theta error and control if its desired in the config
@@ -43,21 +53,31 @@ static MovementResult execute_movement_internal(
         float theta_control = 0;
         if (config.angle.has_value()) {
             theta_error = std::remainder(config.angle.value() - robot_theta, 360);
-            theta_control = chassis->angular_pid.update<long long>(pos_error.norm(), std::nullopt, ctime);
+            theta_control = chassis->angular_pid.update<long long>(0, theta_error, ctime);
         }
 
         // Compute exit conditions
         bool sat = true;
-        if (config.angle_threshold.has_value())
-            sat &= std::abs(theta_error) <= config.angle_threshold.value();
-        if (config.angular_speed_threshold.has_value())
-            sat &= chassis->angular_speed() <= config.angular_speed_threshold.value();
-        if (config.distance_threshold.has_value())
-            sat &= pos_error.norm() <= config.distance_threshold.value();
-        if (config.speed_threshold.has_value())
-            sat &= chassis->speed() <= config.speed_threshold.value();
+        if (config.angle.has_value()) {
+            sat &= std::abs(theta_error) <= config.angle_threshold.value()
+                && config.angle_threshold.has_value();
+
+            if (config.angular_speed_threshold.has_value())
+                sat &= chassis->angular_speed() <= config.angular_speed_threshold.value();
+        }
+        if (config.pos.has_value()) {
+            sat &= pos_error.norm() <= config.distance_threshold.value() 
+                && config.distance_threshold.has_value();
+
+            if (config.speed_threshold.has_value())
+                sat &= chassis->speed() <= config.speed_threshold.value();
+        }
+
+        // printf("Robot pos: (%.4f, %.4f), Robot theta: %.4f, Pos error: (%.4f, %.4f), Theta error: %.4f, Sat: %d\n", 
+        //     robot_pos.x(), robot_pos.y(), robot_theta, pos_error.x(), pos_error.y(), theta_error, sat);
 
         if (sat) {
+            zero_velocity(chassis);
             return MovementResult {
                 .resultcode = ResultCode::SUCCESS,
                 .time_taken = (ctime - start_time) / 1e6,
@@ -65,6 +85,7 @@ static MovementResult execute_movement_internal(
                 .angle_error = config.angle.has_value() ? std::optional(theta_error) : std::nullopt
             };
         } else if (cancelled()) {
+            zero_velocity(chassis);
             return MovementResult {
                 .resultcode = ResultCode::CANCELLED,
                 .time_taken = (ctime - start_time) / 1e6,
@@ -73,31 +94,44 @@ static MovementResult execute_movement_internal(
             };
         }
 
-        std::vector<std::pair<uint8_t, float>> controls;
+        std::vector<std::pair<int8_t, float>> dots;
+        float pos_error_norm = std::max(1e-5f, pos_error.norm());
+        float max_dot = 1.0f;
         for (auto const& motor : chassis->motors) {
             float dot = theta_control;
+
             if (config.pos.has_value()) {
-                dot += motor.direction.dot(pos_error) * pos_control;
+                dot += motor.direction.dot(pos_error / pos_error_norm)
+                    * pos_control;
+                    // * std::cos(theta_error * DEGREE_TO_RAD);
             }
-            controls.emplace_back(motor.port, dot);
+
+            max_dot = std::max(max_dot, std::abs(dot));
+            dots.emplace_back(motor.port, dot);
         }
 
-        // Find the maximum control output
-        auto max_it = std::max_element(
-            controls.begin(), 
-            controls.end(),
-            [](const auto& a, const auto& b) { return std::abs(a.second) < std::abs(b.second); });
-        float maxdot = std::max(1.0f, std::abs(max_it->second));
+        // Calculate slew in RPM
+        double dt = (ctime - last_time) / 1e6;
+        float slew = config.slew_rate * dt;
 
         // Output to pros
-        for (const auto& [port, ctrl] : controls) {
-            int millivolts = std::round(ctrl / maxdot * 12000);
-            pros::c::motor_move_voltage(port, millivolts);
+        for (auto& [port, ctrl] : dots) {
+            float desired_velo = std::round(ctrl * config.max_velocity / max_dot);
+            float actual = std::clamp(
+                desired_velo,
+                std::max(-config.max_velocity, controls[port] - slew),
+                std::min(config.max_velocity, controls[port] + slew));
+            printf("port %d: control %.4f, output %.2f\n", port, ctrl, actual);
+
+            controls[port] = actual;
+            pros::c::motor_move_velocity(port, actual);
         }
 
+        last_time = ctime;
         pros::delay(10);
     }
 
+    zero_velocity(chassis);
     return MovementResult {
         .resultcode = ResultCode::TIMEOUT,
         .time_taken = (ctime - start_time) / 1e6,
@@ -135,12 +169,12 @@ Future<MovementResult> HolonomicChassis::execute_movement_async(
 
     auto fut = params->promise.get_future();
 
-    pros::c::task_create(
-        lambda,
-        static_cast<void*>(params),
-        TASK_PRIORITY_DEFAULT,
-        TASK_STACK_DEPTH_DEFAULT,
-        "Movement task");
+    // pros::c::task_create(
+    //     lambda,
+    //     static_cast<void*>(params),
+    //     TASK_PRIORITY_DEFAULT,
+    //     TASK_STACK_DEPTH_DEFAULT,
+    //     "Movement task");
 
     return fut;
 }
